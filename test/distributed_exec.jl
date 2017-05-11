@@ -12,6 +12,44 @@ include("testenv.jl")
 
 addprocs_with_testenv(4)
 
+# Test that the client port is reused. SO_REUSEPORT may not be supported on
+# all UNIX platforms, Linux kernels prior to 3.9 and older versions of OSX
+if is_unix()
+    # Run the test on all workers.
+    results = asyncmap(procs()) do p
+        remotecall_fetch(p) do
+            client_ports = []
+            for w in Base.Distributed.PGRP.workers
+                if isa(w, Base.Distributed.Worker)
+                    s = w.r_stream
+                    rport = Ref{Cushort}(0)
+                    raddress = zeros(UInt8, 16)
+                    rfamily = Ref{Cuint}(0)
+
+                    r = ccall(:jl_tcp_getsockname, Int32,
+                                (Ptr{Void}, Ref{Cushort}, Ptr{Void}, Ref{Cuint}),
+                                s.handle, rport, raddress, rfamily)
+                    Base.uv_error("cannot obtain socket name", r)
+                    if r == 0
+                        push!(client_ports, ntoh(rport[]))
+                    else
+                        error("cannot obtain socket name")
+                    end
+                end
+            end
+            @assert length(client_ports) == nworkers()
+            if !all(i -> i == client_ports[1], client_ports[2:end])
+                warn("SO_REUSEPORT TESTS FAILED. UNSUPPORTED/OLDER UNIX VERSION?")
+                return 0
+            end
+            return myid()
+        end
+    end
+
+    # Ensure that the code has indeed been executed on all processes
+    @test all(p -> p in results, procs())
+end
+
 id_me = myid()
 id_other = filter(x -> x != id_me, procs())[rand(1:(nprocs()-1))]
 
